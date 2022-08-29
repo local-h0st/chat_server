@@ -8,11 +8,14 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
 
 const secret_key = "redh3t_OnTheWayy"
+
+// TODO 正式部署记得改密钥，不然github源码审计
 
 const data_dir = "D:\\GolandProjects\\chat_server\\data\\"
 
@@ -55,9 +58,11 @@ func handelConn(conn net.Conn) {
 	for true {
 		conn.SetReadDeadline(time.Now().Add(10 * time.Minute)) // 刷新断开连接时间
 		cmd_str := getCmdString(conn)
-		fmt.Println("[recv from client]", cmd_str) // TODO log printed
 		cmd_slice := processCmdStrToSlice(cmd_str)
-		processCmd(conn, cmd_slice)
+		processCmd(conn, cmd_slice, cmd_str)
+		// TODO log printed
+		fmt.Println("[recv from client]", cmd_str)
+		fmt.Println("[slice total]", len(cmd_slice))
 	}
 }
 
@@ -95,7 +100,7 @@ func processCmdStrToSlice(cmd string) (cmd_slice []string) {
 	return cmd_slice
 }
 
-func processCmd(conn net.Conn, cmd []string) (err error) {
+func processCmd(conn net.Conn, cmd []string, cmd_str string) (err error) {
 	// 只传入空格报错的原因找到了！是因为cmd_slice根本没有[0]，直接越界了
 	//fmt.Println(len(cmd))
 	if len(cmd) == 0 {
@@ -137,6 +142,25 @@ func processCmd(conn net.Conn, cmd []string) (err error) {
 				break
 			}
 		}
+	case "sendmsg":
+		id_index := 0
+		msg_index := 0
+		for k, v := range cmd {
+			if v == "-to" {
+				id_index = k
+			} else if v == "-msg" {
+				msg_index = k
+			}
+		}
+		if id_index > msg_index {
+			conn.Write([]byte(getUsage("sendmsg")))
+			return nil
+		}
+		// 先正则匹配一部分算了，需要原先的str
+		match_msg := regexp.MustCompile("-msg .* -id ")
+		// TODO 非贪婪or贪婪？
+		msg_str := match_msg.FindString(cmd_str)[5:]
+		conn.Write([]byte(msg_str))
 	default:
 		conn.Write([]byte("Unknown command"))
 	}
@@ -151,7 +175,8 @@ func getUsage(cmd string) (usage string) {
 		return "[usage] login -t (your_token)"
 	case "whoami":
 		return "[usage] whoami"
-
+	case "sendmsg":
+		return "[usage] sendmsg -to (receiver_id) -msg your_message here\n[warning] -msg must be the last arg"
 	default:
 		return "command " + cmd + " not found"
 	}
