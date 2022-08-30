@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"regexp"
@@ -14,6 +15,10 @@ import (
 )
 
 const secret_key = "redh3t_OnTheWayy"
+const ARGUMENT_INDEX_NOT_FOUND = -1
+const LOCK = true
+
+var lock_channel = make(chan bool, 1)
 
 // TODO 正式部署记得改密钥，不然github源码审计
 
@@ -60,9 +65,7 @@ func handelConn(conn net.Conn) {
 		cmd_str := getCmdString(conn)
 		cmd_slice := processCmdStrToSlice(cmd_str)
 		processCmd(conn, cmd_slice, cmd_str)
-		// TODO log printed
-		fmt.Println("[recv from client]", cmd_str)
-		fmt.Println("[slice total]", len(cmd_slice))
+		fmt.Println("[recv from client]", cmd_str) // TODO log
 	}
 }
 
@@ -143,24 +146,146 @@ func processCmd(conn net.Conn, cmd []string, cmd_str string) (err error) {
 			}
 		}
 	case "sendmsg":
-		id_index := 0
-		msg_index := 0
+		to_index := ARGUMENT_INDEX_NOT_FOUND
+		msg_index := ARGUMENT_INDEX_NOT_FOUND
+		id_index := ARGUMENT_INDEX_NOT_FOUND
 		for k, v := range cmd {
 			if v == "-to" {
-				id_index = k
+				to_index = k
 			} else if v == "-msg" {
 				msg_index = k
+			} else if v == "-id" {
+				id_index = k
 			}
 		}
-		if id_index > msg_index {
+		if to_index == ARGUMENT_INDEX_NOT_FOUND || msg_index == ARGUMENT_INDEX_NOT_FOUND || id_index == ARGUMENT_INDEX_NOT_FOUND {
+			conn.Write([]byte(getUsage("sendmsg")))
+			return nil
+		} else if to_index > msg_index {
 			conn.Write([]byte(getUsage("sendmsg")))
 			return nil
 		}
 		// 先正则匹配一部分算了，需要原先的str
 		match_msg := regexp.MustCompile("-msg .* -id ")
 		// TODO 非贪婪or贪婪？
-		msg_str := match_msg.FindString(cmd_str)[5:]
-		conn.Write([]byte(msg_str))
+		msg_str := match_msg.FindString(cmd_str)
+		msg_str = msg_str[5 : len(msg_str)-5]
+		recv_id := cmd[to_index+1]
+		_, err = os.Stat(data_dir + recv_id + ".chat")
+		if err != nil {
+			// 文件不存在，也就是id invalid
+			conn.Write([]byte("sorry, currently we don't have a user named " + recv_id + " :("))
+			return nil
+		}
+		send_id := cmd[id_index+1]
+		str_in_send := "[send]{{{to::" + recv_id + "}}}{{{content::" + msg_str + "}}}\n"
+		str_in_recv := "[recv]{{{from::" + send_id + "}}}{{{content::" + msg_str + "}}}[unchecked]\n"
+		// lock
+		lock_channel <- LOCK
+		send_file_path := data_dir + send_id + ".chat"
+		file, _ := os.OpenFile(send_file_path, os.O_WRONLY|os.O_APPEND, 0666)
+		file.WriteString(str_in_send)
+		file.Close()
+		<-lock_channel       // unlock
+		lock_channel <- LOCK // lock again
+		recv_file_path := data_dir + recv_id + ".chat"
+		file, _ = os.OpenFile(recv_file_path, os.O_WRONLY|os.O_APPEND, 0666)
+		file.WriteString(str_in_recv)
+		file.Close()
+		<-lock_channel // unlock
+		conn.Write([]byte("done"))
+	case "checkmsg":
+		fmt.Println(len(cmd))
+		if len(cmd) != 3 && len(cmd) != 4 {
+			conn.Write([]byte(getUsage("checkmsg")))
+			return nil
+		}
+		id_index := ARGUMENT_INDEX_NOT_FOUND
+		all_index := ARGUMENT_INDEX_NOT_FOUND
+		for k, v := range cmd {
+			if v == "-id" {
+				id_index = k
+			} else if v == "-all" {
+				all_index = k
+			}
+		}
+		line_slice := make([]string, 0)
+		lock_channel <- LOCK
+		f, _ := os.Open(data_dir + cmd[id_index+1] + ".chat")
+		r := bufio.NewReader(f)
+		for true {
+			line_byte, _, err := r.ReadLine()
+			if err == io.EOF {
+				break
+			}
+			line_str := string(line_byte)
+			line_slice = append(line_slice, line_str)
+		}
+		f.Close()
+		<-lock_channel
+		send_client_slice := make([]string, 0)
+		for k, v := range line_slice {
+			if k == 0 { // 第一行是注册信息
+				continue
+			}
+			if v[:6] != "[recv]" {
+				continue
+			}
+			match_msg := regexp.MustCompile("(?U){{{content::.*}}}")
+			msg := match_msg.FindString(v)[12:]
+			msg = msg[:len(msg)-3]
+			match_from := regexp.MustCompile("(?U){{{from::.*}}}")
+			from_id := match_from.FindString(v)[9:]
+			from_id = from_id[:len(from_id)-3]
+			unchecked_flag := false
+			if v[len(v)-11:] == "[unchecked]" {
+				unchecked_flag = true
+			}
+			if (all_index == ARGUMENT_INDEX_NOT_FOUND && unchecked_flag == true) || all_index != ARGUMENT_INDEX_NOT_FOUND {
+				send_client_slice = append(send_client_slice, "From @"+from_id+": "+msg)
+			}
+		}
+
+		if len(send_client_slice) == 0 {
+			conn.Write([]byte("No message"))
+			return nil
+		}
+		send_client_str := ""
+		for k, v := range send_client_slice {
+			if k == 0 {
+				send_client_str += v
+			} else {
+				send_client_str += "\n" + v
+			}
+		}
+		conn.Write([]byte(send_client_str))
+
+		// update states check -all will not influence
+		if all_index == ARGUMENT_INDEX_NOT_FOUND {
+			lock_channel <- LOCK
+			// TODO 写一个tmp文件，之后删除源文件 重命名新文件
+			tmp_file, _ := os.Create(data_dir + cmd[id_index+1] + ".chat_tmp")
+			f, _ := os.Open(data_dir + cmd[id_index+1] + ".chat")
+			r := bufio.NewReader(f)
+			for true {
+				line_byte, _, err := r.ReadLine()
+				if err == io.EOF {
+					break
+				}
+				line_str := string(line_byte)
+				if line_str[len(line_str)-11:] == "[unchecked]" {
+					tmp_file.Write([]byte(line_str[:len(line_str)-11] + "\n"))
+				} else {
+					tmp_file.Write([]byte(line_str + "\n"))
+				}
+			}
+			f.Close()
+			tmp_file.Close()
+			os.Remove(data_dir + cmd[id_index+1] + ".chat")
+			os.Rename(data_dir+cmd[id_index+1]+".chat_tmp", data_dir+cmd[id_index+1]+".chat")
+			<-lock_channel
+		}
+		return nil
 	default:
 		conn.Write([]byte("Unknown command"))
 	}
@@ -177,6 +302,8 @@ func getUsage(cmd string) (usage string) {
 		return "[usage] whoami"
 	case "sendmsg":
 		return "[usage] sendmsg -to (receiver_id) -msg your_message here\n[warning] -msg must be the last arg"
+	case "checkmsg":
+		return "[usage] checkmsg [-all]"
 	default:
 		return "command " + cmd + " not found"
 	}
@@ -191,7 +318,7 @@ func register(id string) (result string, err error) {
 		if err != nil {
 			fmt.Println(err)
 		} else {
-			_, err = file.Write([]byte("[created] id: " + id + " time: " + time.Now().Format("2006-01-02 15:04:05")))
+			_, err = file.Write([]byte("[created] id: " + id + " time: " + time.Now().Format("2006-01-02 15:04:05") + "\n"))
 			file.Close()
 		}
 		encrypted, err := mtl.AesEncrypt([]byte(id), []byte(secret_key))

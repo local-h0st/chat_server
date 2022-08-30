@@ -1,1 +1,5 @@
 [created] id: redh3t time: 2022-08-29 15:38:50
+[send]{{{to::debug}}}{{{content::hello debug, this is redh3t}}}
+[send]{{{to::debug}}}{{{content::This is the second message I send you, debug!}}}
+[recv]{{{from::debug}}}{{{content::Hello redh3t, I received your message successfullllllly!}}}
+[recv]{{{from::debug}}}{{{content::I like your idea!That was awsome!}}}
