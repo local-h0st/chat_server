@@ -263,7 +263,7 @@ func processCmd(conn net.Conn, cmd []string, cmd_str string) (err error) {
 		// update states check -all will not influence
 		if all_index == ARGUMENT_INDEX_NOT_FOUND {
 			lock_channel <- LOCK
-			// TODO 写一个tmp文件，之后删除源文件 重命名新文件
+			// 写一个tmp文件，之后删除源文件 重命名新文件
 			tmp_file, _ := os.Create(data_dir + cmd[id_index+1] + ".chat_tmp")
 			f, _ := os.Open(data_dir + cmd[id_index+1] + ".chat")
 			r := bufio.NewReader(f)
