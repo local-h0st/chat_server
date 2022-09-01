@@ -3,3 +3,5 @@
 [recv]{{{from::redh3t}}}{{{content::This is the second message I send you, debug!}}}
 [send]{{{to::redh3t}}}{{{content::Hello redh3t, I received your message successfullllllly!}}}
 [send]{{{to::redh3t}}}{{{content::I like your idea!That was awsome!}}}
+[send]{{{to::test}}}{{{content::hello test, this is debug's mes}}}{{{timestamp::2022-09-01 13:09:18}}}
+[send]{{{to::test}}}{{{content::hello test, this is the second message from debug!}}}{{{timestamp::2022-09-01 13:10:58}}}

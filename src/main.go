@@ -14,28 +14,29 @@ import (
 	"time"
 )
 
-const secret_key = "redh3t_OnTheWayy"
-const ARGUMENT_INDEX_NOT_FOUND = -1
-const LOCK = true
-
-var lock_channel = make(chan bool, 1)
-
 // TODO 正式部署记得改密钥，不然github源码审计
 
 const data_dir = "D:\\GolandProjects\\chat_server\\data\\"
+const secret_key = "redh3t_OnTheWayy"
+const NOT_LOG_IN = "youjustdidntlogin"
+const INTIME_CHAT_NO_OTHER_ID = "intime_chat_no_other_id"
+const (
+	ARGUMENT_INDEX_NOT_FOUND = -iota
+	NO_LOGIN_INDEX
+	INDEX_TO_OFFLINE_NOT_FOUND
+)
 
-func main() {
-	listener, err := startListen(":5000")
-	if err != nil {
-		panic(err)
-	}
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			fmt.Println(err)
-		}
-		go handelConn(conn)
-	}
+var lock_channel = make(chan bool, 1) // file read|write lock
+var online_id = make([]string, 0)
+
+type SESSION struct { // TODO 不知道还要有什么
+	conn                     net.Conn
+	curr_id                  string
+	intime_chat_the_other_id string
+}
+type CMD struct {
+	cmd_str   string
+	cmd_slice []string
 }
 
 func startListen(port string) (listener *net.TCPListener, err error) {
@@ -49,26 +50,33 @@ func startListen(port string) (listener *net.TCPListener, err error) {
 	}
 	return listener, nil
 }
-
-func handelConn(conn net.Conn) {
-	defer func() {
-		if recover() != nil {
-			fmt.Println("a conn crashed")
-		}
-	}() // 并发中一个connection crash捕获panic
-	fmt.Println("new handle_conn created")
-	conn.SetReadDeadline(time.Now().Add(10 * time.Minute)) // 2 min time out
-	defer conn.Close()
-
-	for true {
-		conn.SetReadDeadline(time.Now().Add(10 * time.Minute)) // 刷新断开连接时间
-		cmd_str := getCmdString(conn)
-		cmd_slice := processCmdStrToSlice(cmd_str)
-		processCmd(conn, cmd_slice, cmd_str)
-		fmt.Println("[recv from client]", cmd_str) // TODO log
+func getUsage(cmd string) (usage string) {
+	switch cmd {
+	case "register":
+		return "[usage] register (your_id_here_no_space_allowed)"
+	case "login":
+		return "[usage] login (your_token)"
+	case "whoami":
+		return "[usage] whoami"
+	case "sendmsg":
+		return "[usage] sendmsg -to (receiver_id) -msg your_message here\n[warning] -msg must be the last arg"
+	case "checkmsg":
+		return "[usage] checkmsg [-all]"
+	case "startchat":
+		return "[usage] startchat -with (id)"
+	case "help":
+		return "currently we support the following commands:\nregister\nlogin\nwhoami\nsendmsg\ncheckmsg\nstartchat(still under development...)\nto see any of them ,type 'help (cmd)'"
+	default:
+		return "command " + cmd + " not found, type 'help' for more info"
 	}
 }
-
+func printOnline(online_slice []string) {
+	fmt.Println("[current online]")
+	for _, v := range online_slice {
+		fmt.Println(v)
+	}
+	fmt.Println("[online id printed]")
+} // TODO debug
 func getCmdString(conn net.Conn) (cmd_str string) {
 	buff_size := 128
 	var cmd_buff []byte
@@ -93,7 +101,6 @@ func getCmdString(conn net.Conn) (cmd_str string) {
 	cmd_str = string(cmd_buff)
 	return cmd_str
 }
-
 func processCmdStrToSlice(cmd string) (cmd_slice []string) {
 	command := bufio.NewScanner(strings.NewReader(cmd))
 	command.Split(bufio.ScanWords)
@@ -103,210 +110,257 @@ func processCmdStrToSlice(cmd string) (cmd_slice []string) {
 	return cmd_slice
 }
 
-func processCmd(conn net.Conn, cmd []string, cmd_str string) (err error) {
-	// 只传入空格报错的原因找到了！是因为cmd_slice根本没有[0]，直接越界了
-	//fmt.Println(len(cmd))
-	if len(cmd) == 0 {
-		conn.Write([]byte("Hey why you type so many spaces?"))
-		return nil
+func main() {
+	listener, err := startListen(":5000")
+	if err != nil {
+		panic(err)
 	}
-	switch cmd[0] {
-	case "register":
-		if len(cmd) != 3 {
-			conn.Write([]byte(getUsage("register")))
-		} else if cmd[1] != "-id" {
-			conn.Write([]byte(getUsage("register")))
-		} else { // command valid
-			result, err := register(cmd[2])
-			if err != nil {
-				fmt.Println(err)
-			} else {
-				conn.Write([]byte(result))
-				// result可以是成功主策划返回的token，也可以是注册失败告诉client的一条指令
-			}
-		}
-	case "login": // TODO 更新在线状态
-		if len(cmd) != 3 {
-			conn.Write([]byte(getUsage("login")))
-		} else if cmd[1] != "-t" {
-			conn.Write([]byte(getUsage("login")))
-		} else {
-			user_id, err := loginCheck(cmd[2])
-			if err != nil {
-				conn.Write([]byte("Token invalid, login failed:("))
-			} else {
-				conn.Write([]byte("[#clientmov#] login_success -id " + user_id))
-			}
-		}
-	case "whoami":
-		for k, v := range cmd {
-			if v == "-id" && len(cmd) >= k+2 {
-				conn.Write([]byte("you login as : " + cmd[k+1]))
-				break
-			}
-		}
-	case "sendmsg":
-		to_index := ARGUMENT_INDEX_NOT_FOUND
-		msg_index := ARGUMENT_INDEX_NOT_FOUND
-		id_index := ARGUMENT_INDEX_NOT_FOUND
-		for k, v := range cmd {
-			if v == "-to" {
-				to_index = k
-			} else if v == "-msg" {
-				msg_index = k
-			} else if v == "-id" {
-				id_index = k
-			}
-		}
-		if to_index == ARGUMENT_INDEX_NOT_FOUND || msg_index == ARGUMENT_INDEX_NOT_FOUND || id_index == ARGUMENT_INDEX_NOT_FOUND {
-			conn.Write([]byte(getUsage("sendmsg")))
-			return nil
-		} else if to_index > msg_index {
-			conn.Write([]byte(getUsage("sendmsg")))
-			return nil
-		}
-		// 先正则匹配一部分算了，需要原先的str
-		match_msg := regexp.MustCompile("-msg .* -id ")
-		// TODO 非贪婪or贪婪？
-		msg_str := match_msg.FindString(cmd_str)
-		msg_str = msg_str[5 : len(msg_str)-5]
-		recv_id := cmd[to_index+1]
-		_, err = os.Stat(data_dir + recv_id + ".chat")
+	for {
+		conn, err := listener.Accept()
 		if err != nil {
-			// 文件不存在，也就是id invalid
-			conn.Write([]byte("sorry, currently we don't have a user named " + recv_id + " :("))
-			return nil
+			fmt.Println(err)
 		}
-		send_id := cmd[id_index+1]
-		str_in_send := "[send]{{{to::" + recv_id + "}}}{{{content::" + msg_str + "}}}\n"
-		str_in_recv := "[recv]{{{from::" + send_id + "}}}{{{content::" + msg_str + "}}}[unchecked]\n"
-		// lock
-		lock_channel <- LOCK
-		send_file_path := data_dir + send_id + ".chat"
-		file, _ := os.OpenFile(send_file_path, os.O_WRONLY|os.O_APPEND, 0666)
-		file.WriteString(str_in_send)
-		file.Close()
-		<-lock_channel       // unlock
-		lock_channel <- LOCK // lock again
-		recv_file_path := data_dir + recv_id + ".chat"
-		file, _ = os.OpenFile(recv_file_path, os.O_WRONLY|os.O_APPEND, 0666)
-		file.WriteString(str_in_recv)
-		file.Close()
-		<-lock_channel // unlock
-		conn.Write([]byte("done"))
-	case "checkmsg":
-		fmt.Println(len(cmd))
-		if len(cmd) != 3 && len(cmd) != 4 {
-			conn.Write([]byte(getUsage("checkmsg")))
-			return nil
+		new_sess := SESSION{
+			conn:                     conn,
+			curr_id:                  NOT_LOG_IN,
+			intime_chat_the_other_id: INTIME_CHAT_NO_OTHER_ID,
 		}
-		id_index := ARGUMENT_INDEX_NOT_FOUND
-		all_index := ARGUMENT_INDEX_NOT_FOUND
-		for k, v := range cmd {
-			if v == "-id" {
-				id_index = k
-			} else if v == "-all" {
-				all_index = k
-			}
-		}
-		line_slice := make([]string, 0)
-		lock_channel <- LOCK
-		f, _ := os.Open(data_dir + cmd[id_index+1] + ".chat")
-		r := bufio.NewReader(f)
-		for true {
-			line_byte, _, err := r.ReadLine()
-			if err == io.EOF {
-				break
-			}
-			line_str := string(line_byte)
-			line_slice = append(line_slice, line_str)
-		}
-		f.Close()
-		<-lock_channel
-		send_client_slice := make([]string, 0)
-		for k, v := range line_slice {
-			if k == 0 { // 第一行是注册信息
-				continue
-			}
-			if v[:6] != "[recv]" {
-				continue
-			}
-			match_msg := regexp.MustCompile("(?U){{{content::.*}}}")
-			msg := match_msg.FindString(v)[12:]
-			msg = msg[:len(msg)-3]
-			match_from := regexp.MustCompile("(?U){{{from::.*}}}")
-			from_id := match_from.FindString(v)[9:]
-			from_id = from_id[:len(from_id)-3]
-			unchecked_flag := false
-			if v[len(v)-11:] == "[unchecked]" {
-				unchecked_flag = true
-			}
-			if (all_index == ARGUMENT_INDEX_NOT_FOUND && unchecked_flag == true) || all_index != ARGUMENT_INDEX_NOT_FOUND {
-				send_client_slice = append(send_client_slice, "From @"+from_id+": "+msg)
-			}
-		}
-
-		if len(send_client_slice) == 0 {
-			conn.Write([]byte("No message"))
-			return nil
-		}
-		send_client_str := ""
-		for k, v := range send_client_slice {
-			if k == 0 {
-				send_client_str += v
-			} else {
-				send_client_str += "\n" + v
-			}
-		}
-		conn.Write([]byte(send_client_str))
-
-		// update states check -all will not influence
-		if all_index == ARGUMENT_INDEX_NOT_FOUND {
-			lock_channel <- LOCK
-			// 写一个tmp文件，之后删除源文件 重命名新文件
-			tmp_file, _ := os.Create(data_dir + cmd[id_index+1] + ".chat_tmp")
-			f, _ := os.Open(data_dir + cmd[id_index+1] + ".chat")
-			r := bufio.NewReader(f)
-			for true {
-				line_byte, _, err := r.ReadLine()
-				if err == io.EOF {
-					break
-				}
-				line_str := string(line_byte)
-				if line_str[len(line_str)-11:] == "[unchecked]" {
-					tmp_file.Write([]byte(line_str[:len(line_str)-11] + "\n"))
-				} else {
-					tmp_file.Write([]byte(line_str + "\n"))
-				}
-			}
-			f.Close()
-			tmp_file.Close()
-			os.Remove(data_dir + cmd[id_index+1] + ".chat")
-			os.Rename(data_dir+cmd[id_index+1]+".chat_tmp", data_dir+cmd[id_index+1]+".chat")
-			<-lock_channel
-		}
-		return nil
-	default:
-		conn.Write([]byte("Unknown command"))
+		go handelConn(new_sess)
 	}
-	return nil
 }
 
-func getUsage(cmd string) (usage string) {
-	switch cmd {
-	case "register":
-		return "[usage] register -id (your_id_here_no_space_allowed)"
-	case "login":
-		return "[usage] login -t (your_token)"
-	case "whoami":
-		return "[usage] whoami"
-	case "sendmsg":
-		return "[usage] sendmsg -to (receiver_id) -msg your_message here\n[warning] -msg must be the last arg"
-	case "checkmsg":
-		return "[usage] checkmsg [-all]"
-	default:
-		return "command " + cmd + " not found"
+func handelConn(sess SESSION) { // 每次用go单开的一个线程都对应一个正在使用的client
+	conn := sess.conn
+	defer func() {
+		if recover() != nil {
+			if sess.curr_id == NOT_LOG_IN {
+				fmt.Println("a conn crashed, but it didn't even login")
+			} else {
+				// 复用了
+				index_to_offline := NO_LOGIN_INDEX
+				for k, v := range online_id {
+					if v == sess.curr_id {
+						index_to_offline = k
+						break
+					}
+				}
+				if index_to_offline == NO_LOGIN_INDEX {
+					fmt.Println("Damn why I cannot find the id to make it offline!")
+				} else {
+					online_id = append(online_id[:index_to_offline], online_id[index_to_offline+1:]...)
+				}
+				// 复用结束
+				fmt.Println("a conn crashed, id " + sess.curr_id + " automatically offline")
+			}
+		}
+	}() // 捕获conn crash的panic， 如果已登录则自动从online_id中删除
+	fmt.Println("new conn created")
+	defer conn.Close()
+	for true {
+		conn.SetReadDeadline(time.Now().Add(10 * time.Minute)) // 刷新断开连接时间
+		cmd_str := getCmdString(conn)
+		cmd_slice := processCmdStrToSlice(cmd_str)
+		cmd := CMD{
+			cmd_str:   cmd_str,
+			cmd_slice: cmd_slice,
+		}
+		rewriteProcessCmd(&sess, cmd)
 	}
+}
+
+func rewriteProcessCmd(sess *SESSION, cmd CMD) { // 应该传指针，这样的话才能修改原来的那个session
+	if len(cmd.cmd_slice) == 0 { // 解决client只打空格的问题
+		sess.conn.Write([]byte("Hey why you type so many spaces?"))
+	} else {
+		switch cmd.cmd_slice[0] {
+		case "whoam!":
+			if len(cmd.cmd_slice) != 1 {
+				sess.conn.Write([]byte(getUsage("whoami")))
+			} else {
+				if sess.curr_id == NOT_LOG_IN {
+					sess.conn.Write([]byte("Careless Whispers by whoam!, that is my favorite song ever!!!!!!\nbut you are just a guest..."))
+				} else {
+					sess.conn.Write([]byte("I am saying 'hi' to @" + sess.curr_id + ", yeah I mean you, I must confess that\nCareless Whispers is my favorite song EVER!!!!!!"))
+				}
+			}
+		case "whoami":
+			if len(cmd.cmd_slice) != 1 {
+				sess.conn.Write([]byte(getUsage("whoami")))
+			} else {
+				if sess.curr_id == NOT_LOG_IN {
+					sess.conn.Write([]byte("you are just a guest..."))
+				} else {
+					sess.conn.Write([]byte("you login as @" + sess.curr_id))
+				}
+			}
+		case "register":
+			if len(cmd.cmd_slice) != 2 {
+				sess.conn.Write([]byte("register"))
+			} else {
+				result, _ := register(cmd.cmd_slice[1])
+				sess.conn.Write([]byte(result))
+			} // 返回token或者id exists
+		case "login":
+			if len(cmd.cmd_slice) != 2 {
+				sess.conn.Write([]byte(getUsage("login")))
+			} else {
+				user_id, err := loginCheck(cmd.cmd_slice[1])
+				if err != nil {
+					sess.conn.Write([]byte("Token invalid, login failed:("))
+				} else {
+					sess.conn.Write([]byte("[#clientmov#] login_success -id " + user_id))
+					// 以下操作是更新server记录的在线信息
+					if sess.curr_id != NOT_LOG_IN {
+						// 已登录，需要先下线
+						index_to_offline := INDEX_TO_OFFLINE_NOT_FOUND
+						for k, v := range online_id {
+							if v == sess.curr_id {
+								index_to_offline = k
+								break
+							}
+						}
+						if index_to_offline == INDEX_TO_OFFLINE_NOT_FOUND {
+							fmt.Println("Damn why I cannot find the id to make it offline!")
+						} else {
+							online_id = append(online_id[:index_to_offline], online_id[index_to_offline+1:]...)
+						}
+					}
+					// 上线
+					sess.curr_id = user_id
+					online_id = append(online_id, sess.curr_id)
+				}
+			}
+		case "sendmsg":
+			to_index := ARGUMENT_INDEX_NOT_FOUND
+			msg_index := ARGUMENT_INDEX_NOT_FOUND
+			for k, v := range cmd.cmd_slice {
+				if v == "-to" {
+					to_index = k
+				} else if v == "-msg" {
+					msg_index = k
+				}
+			}
+			if to_index == ARGUMENT_INDEX_NOT_FOUND || msg_index == ARGUMENT_INDEX_NOT_FOUND {
+				sess.conn.Write([]byte(getUsage("sendmsg")))
+			} else if to_index > msg_index {
+				sess.conn.Write([]byte(getUsage("sendmsg")))
+			} else { // 寻找各项参数结束，并完成check valid工作
+				recv_id := cmd.cmd_slice[to_index+1]
+				_, err := os.Stat(data_dir + recv_id + ".chat")
+				if err != nil {
+					sess.conn.Write([]byte("sorry, currently we don't have a user named " + recv_id + " :("))
+				} else {
+					msg_str := regexp.MustCompile("-msg .*").FindString(cmd.cmd_str)[5:]
+					send_id := sess.curr_id
+					time_stamp := time.Now().Format("2006-01-02 15:04:05")
+					str_in_send := "[send]{{{to::" + recv_id + "}}}{{{content::" + msg_str + "}}}{{{timestamp::" + time_stamp + "}}}\n"
+					str_in_recv := "[recv]{{{from::" + send_id + "}}}{{{content::" + msg_str + "}}}{{{timestamp::" + time_stamp + "}}}[unchecked]\n"
+					lock_channel <- true // file lock
+					file, _ := os.OpenFile(data_dir+send_id+".chat", os.O_WRONLY|os.O_APPEND, 0666)
+					file.WriteString(str_in_send)
+					file.Close()
+					<-lock_channel       // unlock
+					lock_channel <- true // lock again
+					file, _ = os.OpenFile(data_dir+recv_id+".chat", os.O_WRONLY|os.O_APPEND, 0666)
+					file.WriteString(str_in_recv)
+					file.Close()
+					<-lock_channel // unlock
+					sess.conn.Write([]byte("done"))
+				}
+			}
+		case "checkmsg":
+			if len(cmd.cmd_slice) != 1 && len(cmd.cmd_slice) != 2 {
+				sess.conn.Write([]byte(getUsage("checkmsg")))
+			} else {
+				all_index := ARGUMENT_INDEX_NOT_FOUND
+				if len(cmd.cmd_slice) == 2 {
+					if cmd.cmd_slice[1] == "-all" {
+						all_index = 1
+					} else {
+						sess.conn.Write([]byte(getUsage("checkmsg")))
+						break
+					}
+				} // 检查是否有-all参数
+				line_slice := make([]string, 0)
+				lock_channel <- true // file lock
+				f, _ := os.Open(data_dir + sess.curr_id + ".chat")
+				r := bufio.NewReader(f)
+				for true {
+					line_byte, _, err := r.ReadLine()
+					if err == io.EOF {
+						break
+					}
+					line_str := string(line_byte)
+					line_slice = append(line_slice, line_str)
+				} // 读取文件每一行的内容
+				f.Close()
+				<-lock_channel // unlock
+				send_client_slice := make([]string, 0)
+				for k, v := range line_slice {
+					if k == 0 { // 第一行是注册信息
+						continue
+					}
+					if v[:6] != "[recv]" {
+						continue
+					}
+					msg := regexp.MustCompile("(?U){{{content::.*}}}").FindString(v)[12:]
+					msg = msg[:len(msg)-3]
+					from_id := regexp.MustCompile("(?U){{{from::.*}}}").FindString(v)[9:]
+					from_id = from_id[:len(from_id)-3]
+					if (all_index == ARGUMENT_INDEX_NOT_FOUND && v[len(v)-11:] == "[unchecked]") || all_index != ARGUMENT_INDEX_NOT_FOUND {
+						send_client_slice = append(send_client_slice, "From @"+from_id+": "+msg)
+					}
+				} // 组装输出内容
+				if all_index == ARGUMENT_INDEX_NOT_FOUND {
+					lock_channel <- true
+					tmp_file, _ := os.Create(data_dir + sess.curr_id + ".chat_tmp")
+					f, _ := os.Open(data_dir + sess.curr_id + ".chat")
+					r := bufio.NewReader(f)
+					for true {
+						line_byte, _, err := r.ReadLine()
+						if err == io.EOF {
+							break
+						}
+						line_str := string(line_byte)
+						if line_str[len(line_str)-11:] == "[unchecked]" {
+							tmp_file.Write([]byte(line_str[:len(line_str)-11] + "\n"))
+						} else {
+							tmp_file.Write([]byte(line_str + "\n"))
+						}
+					}
+					f.Close()
+					tmp_file.Close()
+					os.Remove(data_dir + sess.curr_id + ".chat")
+					os.Rename(data_dir+sess.curr_id+".chat_tmp", data_dir+sess.curr_id+".chat")
+					<-lock_channel
+				} // check不带-all将会更新是否已阅的标记
+				if len(send_client_slice) == 0 {
+					sess.conn.Write([]byte("no new message received"))
+				} else {
+					send_client_str := ""
+					for k, v := range send_client_slice {
+						if k == 0 {
+							send_client_str += v
+						} else {
+							send_client_str += "\n" + v
+						}
+					}
+					sess.conn.Write([]byte(send_client_str))
+				} // 输出到client环节
+			}
+		case "help":
+			if len(cmd.cmd_slice) != 2 {
+				sess.conn.Write([]byte(getUsage("help")))
+			} else {
+				sess.conn.Write([]byte(getUsage(cmd.cmd_slice[1])))
+			}
+		case "printonline": // TODO debug cmd
+			printOnline(online_id)
+		default:
+			sess.conn.Write([]byte("unknown command, type 'help' to see more"))
+		}
+	}
+
 }
 
 func register(id string) (result string, err error) {
@@ -345,7 +399,8 @@ func loginCheck(token_str string) (user_id string, err error) {
 	if r != nil { // panic了
 		return "", errors.New("AesDecrypt crashed")
 	} else {
-		return string(tmp), nil
+		user_id = string(tmp)
+		return user_id, nil
 	}
 
 }
