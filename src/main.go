@@ -17,7 +17,7 @@ import (
 // TODO 正式部署记得改密钥，不然github源码审计
 
 const data_dir = "D:\\GolandProjects\\chat_server\\data\\"
-const secret_key = "redh3t_OnTheWayy"
+const secret_key = "redh3t_OnTheWayy" //kfccrazythursdayVme50 21bit long
 const NOT_LOG_IN = "youjustdidntlogin"
 const INTIME_CHAT_NO_OTHER_ID = "intime_chat_no_other_id"
 const (
@@ -120,12 +120,12 @@ func main() {
 		if err != nil {
 			fmt.Println(err)
 		}
-		new_sess := SESSION{
+
+		go handelConn(SESSION{
 			conn:                     conn,
 			curr_id:                  NOT_LOG_IN,
 			intime_chat_the_other_id: INTIME_CHAT_NO_OTHER_ID,
-		}
-		go handelConn(new_sess)
+		})
 	}
 }
 
@@ -160,11 +160,10 @@ func handelConn(sess SESSION) { // 每次用go单开的一个线程都对应一�
 		conn.SetReadDeadline(time.Now().Add(10 * time.Minute)) // 刷新断开连接时间
 		cmd_str := getCmdString(conn)
 		cmd_slice := processCmdStrToSlice(cmd_str)
-		cmd := CMD{
+		rewriteProcessCmd(&sess, CMD{
 			cmd_str:   cmd_str,
 			cmd_slice: cmd_slice,
-		}
-		rewriteProcessCmd(&sess, cmd)
+		})
 	}
 }
 
