@@ -33,12 +33,53 @@ type SESSION struct { // TODO 不知道还要有什么
 	conn                     net.Conn
 	curr_id                  string
 	intime_chat_the_other_id string
+	intime_chat_lock         chan bool
 }
 type CMD struct {
 	cmd_str   string
 	cmd_slice []string
 }
 
+func register(id string) (result string, err error) {
+	data_file_path := data_dir + id + ".chat"
+	_, err = os.Stat(data_file_path)
+	if err != nil {
+		// chat文件不存在，允许注册
+		file, err := os.Create(data_file_path)
+		if err != nil {
+			fmt.Println(err)
+		} else {
+			_, err = file.Write([]byte("[created] id: " + id + " time: " + time.Now().Format("2006-01-02 15:04:05") + "\n"))
+			file.Close()
+		}
+		encrypted, err := mtl.AesEncrypt([]byte(id), []byte(secret_key))
+		if err != nil {
+			return "", err
+		}
+		result = base64.StdEncoding.EncodeToString(encrypted)
+		result = "Register success, your token here : " + result
+		return result, nil
+	} else {
+		return "ID already exists", nil
+	}
+
+}
+func loginCheck(token_str string) (user_id string, err error) {
+	tmp, err := base64.StdEncoding.DecodeString(token_str)
+	if err != nil {
+		return "", err
+	}
+	tmp, err = mtl.AesDecrypt(tmp, []byte(secret_key))
+	// aes用的是别人的代码，不晓得会有panic，只能用recover了
+	r := recover()
+	if r != nil { // panic了
+		return "", errors.New("AesDecrypt crashed")
+	} else {
+		user_id = string(tmp)
+		return user_id, nil
+	}
+
+}
 func startListen(port string) (listener *net.TCPListener, err error) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp4", port)
 	if err != nil {
@@ -53,21 +94,21 @@ func startListen(port string) (listener *net.TCPListener, err error) {
 func getUsage(cmd string) (usage string) {
 	switch cmd {
 	case "register":
-		return "[usage] register (your_id_here_no_space_allowed)"
+		return "[usage] register (your_id_here_no_space_allowed)\n"
 	case "login":
-		return "[usage] login (your_token)"
+		return "[usage] login (your_token)\n"
 	case "whoami":
-		return "[usage] whoami"
+		return "[usage] whoami\n"
 	case "sendmsg":
-		return "[usage] sendmsg -to (receiver_id) -msg your_message here\n[warning] -msg must be the last arg"
+		return "[usage] sendmsg -to (receiver_id) -msg your_message here\n[warning] -msg must be the last arg\n"
 	case "checkmsg":
-		return "[usage] checkmsg [-all]"
+		return "[usage] checkmsg [-all]\n"
 	case "startchat":
-		return "[usage] startchat -with (id)"
+		return "[usage] startchat -with (id)\n"
 	case "help":
-		return "currently we support the following commands:\nregister\nlogin\nwhoami\nsendmsg\ncheckmsg\nstartchat(still under development...)\nto see any of them ,type 'help (cmd)'"
+		return "currently we support the following commands:\nregister\nlogin\nwhoami\nsendmsg\ncheckmsg\nstartchat(still under development...)\nto see any of them ,type 'help (cmd)'\n"
 	default:
-		return "command " + cmd + " not found, type 'help' for more info"
+		return "command " + cmd + " not found, type 'help' for more info\n"
 	}
 }
 func printOnline(online_slice []string) {
@@ -121,20 +162,21 @@ func main() {
 			fmt.Println(err)
 		}
 
-		go handelConn(SESSION{
+		new_intime_chat_lock := make(chan bool, 1)
+		go handelConn(&SESSION{
 			conn:                     conn,
 			curr_id:                  NOT_LOG_IN,
 			intime_chat_the_other_id: INTIME_CHAT_NO_OTHER_ID,
+			intime_chat_lock:         new_intime_chat_lock,
 		})
 	}
 }
 
-func handelConn(sess SESSION) { // 每次用go单开的一个线程都对应一个正在使用的client
-	conn := sess.conn
+func handelConn(sess *SESSION) { // 每次用go单开的一个线程都对应一个正在使用的client
 	defer func() {
 		if recover() != nil {
 			if sess.curr_id == NOT_LOG_IN {
-				fmt.Println("a conn crashed, but it didn't even login")
+				fmt.Println("a sess.conn crashed, but it didn't even login")
 			} else {
 				// 复用了
 				index_to_offline := NO_LOGIN_INDEX
@@ -150,17 +192,18 @@ func handelConn(sess SESSION) { // 每次用go单开的一个线程都对应一�
 					online_id = append(online_id[:index_to_offline], online_id[index_to_offline+1:]...)
 				}
 				// 复用结束
-				fmt.Println("a conn crashed, id " + sess.curr_id + " automatically offline")
+				fmt.Println("a sess.conn crashed, id " + sess.curr_id + " automatically offline")
 			}
 		}
 	}() // 捕获conn crash的panic， 如果已登录则自动从online_id中删除
-	fmt.Println("new conn created")
-	defer conn.Close()
+	defer sess.conn.Close()
+	fmt.Println("in handleConn, current id: ", sess.curr_id) // TODO debug
 	for true {
-		conn.SetReadDeadline(time.Now().Add(10 * time.Minute)) // 刷新断开连接时间
-		cmd_str := getCmdString(conn)
+		sess.conn.SetReadDeadline(time.Now().Add(10 * time.Minute)) // 刷新断开连接时间
+		sendNormalPrompt(sess)
+		cmd_str := getCmdString(sess.conn)
 		cmd_slice := processCmdStrToSlice(cmd_str)
-		rewriteProcessCmd(&sess, CMD{
+		rewriteProcessCmd(sess, CMD{
 			cmd_str:   cmd_str,
 			cmd_slice: cmd_slice,
 		})
@@ -355,51 +398,30 @@ func rewriteProcessCmd(sess *SESSION, cmd CMD) { // 应该传指针，这样的�
 			}
 		case "printonline": // TODO debug cmd
 			printOnline(online_id)
+		case "startchat":
+			handleIntimeChat(sess)
 		default:
-			sess.conn.Write([]byte("unknown command, type 'help' to see more"))
+			sess.conn.Write([]byte("unknown command, type 'help' to see more\n"))
 		}
 	}
-
 }
 
-func register(id string) (result string, err error) {
-	data_file_path := data_dir + id + ".chat"
-	_, err = os.Stat(data_file_path)
-	if err != nil {
-		// chat文件不存在，允许注册
-		file, err := os.Create(data_file_path)
-		if err != nil {
-			fmt.Println(err)
-		} else {
-			_, err = file.Write([]byte("[created] id: " + id + " time: " + time.Now().Format("2006-01-02 15:04:05") + "\n"))
-			file.Close()
+func handleIntimeChat(sess *SESSION) { // TODO 下面是测试代码，成功！！！
+	fmt.Println("in handleIntimeChat func")
+	for true {
+		sess.conn.Write([]byte("[in-time chat] @[" + sess.curr_id + "]#> "))
+		intime_chat_recv_str := getCmdString(sess.conn) // 虽然名字会感觉有歧义，但是复用就完了！
+		sess.conn.Write([]byte("your type: " + intime_chat_recv_str))
+		if intime_chat_recv_str == "exit" {
+			break
 		}
-		encrypted, err := mtl.AesEncrypt([]byte(id), []byte(secret_key))
-		if err != nil {
-			return "", err
-		}
-		result = base64.StdEncoding.EncodeToString(encrypted)
-		result = "Register success, your token here : " + result
-		return result, nil
-	} else {
-		return "ID already exists", nil
 	}
-
 }
 
-func loginCheck(token_str string) (user_id string, err error) {
-	tmp, err := base64.StdEncoding.DecodeString(token_str)
-	if err != nil {
-		return "", err
-	}
-	tmp, err = mtl.AesDecrypt(tmp, []byte(secret_key))
-	// aes用的是别人的代码，不晓得会有panic，只能用recover了
-	r := recover()
-	if r != nil { // panic了
-		return "", errors.New("AesDecrypt crashed")
+func sendNormalPrompt(sess *SESSION) {
+	if sess.curr_id == NOT_LOG_IN {
+		sess.conn.Write([]byte("@[?]>>> "))
 	} else {
-		user_id = string(tmp)
-		return user_id, nil
+		sess.conn.Write([]byte("@[" + sess.curr_id + "]>>> "))
 	}
-
 }
