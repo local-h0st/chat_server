@@ -34,11 +34,14 @@ type SESSION struct { // TODO 不知道还要有什么
 	curr_id                  string
 	intime_chat_the_other_id string
 	intime_chat_lock         chan bool
+	intime_chat_file_lock    chan bool
 }
 type CMD struct {
 	cmd_str   string
 	cmd_slice []string
 }
+
+var sessions = make([]*SESSION, 0)
 
 func register(id string) (result string, err error) {
 	data_file_path := data_dir + id + ".chat"
@@ -150,6 +153,16 @@ func processCmdStrToSlice(cmd string) (cmd_slice []string) {
 	}
 	return cmd_slice
 }
+func sendNormalPrompt(sess *SESSION) {
+	if sess.curr_id == NOT_LOG_IN {
+		sess.conn.Write([]byte("@[?]>>> "))
+	} else {
+		sess.conn.Write([]byte("@[" + sess.curr_id + "]>>> "))
+	}
+}
+func sendIntimeChatPrompt(sess *SESSION) {
+	sess.conn.Write([]byte("[in-time chat] @[" + sess.curr_id + "]#> "))
+}
 
 func main() {
 	listener, err := startListen(":5000")
@@ -163,18 +176,29 @@ func main() {
 		}
 
 		new_intime_chat_lock := make(chan bool, 1)
-		go handelConn(&SESSION{
+		new_intime_chat_file_lock := make(chan bool, 1)
+		new_sess := SESSION{
 			conn:                     conn,
 			curr_id:                  NOT_LOG_IN,
 			intime_chat_the_other_id: INTIME_CHAT_NO_OTHER_ID,
 			intime_chat_lock:         new_intime_chat_lock,
-		})
+			intime_chat_file_lock:    new_intime_chat_file_lock,
+		}
+		sessions = append(sessions, &new_sess)
+		go handelConn(&new_sess)
 	}
 }
 
 func handelConn(sess *SESSION) { // 每次用go单开的一个线程都对应一个正在使用的client
 	defer func() {
 		if recover() != nil {
+			index_of_session_to_delete := NO_LOGIN_INDEX
+			for k, v := range sessions {
+				if v.conn == sess.conn {
+					index_of_session_to_delete = k // TODO 不确定conn能不能比较，感觉应该是可以比较的吧，毕竟从头到尾没有修改过
+				}
+			}
+			sessions = append(sessions[:index_of_session_to_delete], sessions[index_of_session_to_delete+1:]...)
 			if sess.curr_id == NOT_LOG_IN {
 				fmt.Println("a sess.conn crashed, but it didn't even login")
 			} else {
@@ -195,12 +219,13 @@ func handelConn(sess *SESSION) { // 每次用go单开的一个线程都对应一
 				fmt.Println("a sess.conn crashed, id " + sess.curr_id + " automatically offline")
 			}
 		}
-	}() // 捕获conn crash的panic， 如果已登录则自动从online_id中删除
+	}() // 捕获conn crash的panic，自动从sessions里面删除，并且如果已登录则自动从online_id中删除
 	defer sess.conn.Close()
 	fmt.Println("in handleConn, current id: ", sess.curr_id) // TODO debug
 	for true {
 		sess.conn.SetReadDeadline(time.Now().Add(10 * time.Minute)) // 刷新断开连接时间
-		sendNormalPrompt(sess)
+		sess.intime_chat_lock <- true
+		<-sess.intime_chat_lock
 		cmd_str := getCmdString(sess.conn)
 		cmd_slice := processCmdStrToSlice(cmd_str)
 		rewriteProcessCmd(sess, CMD{
@@ -220,21 +245,23 @@ func rewriteProcessCmd(sess *SESSION, cmd CMD) { // 应该传指针，这样的�
 				sess.conn.Write([]byte(getUsage("whoami")))
 			} else {
 				if sess.curr_id == NOT_LOG_IN {
-					sess.conn.Write([]byte("Careless Whispers by whoam!, that is my favorite song ever!!!!!!\nbut you are just a guest..."))
+					sess.conn.Write([]byte("Careless Whispers by whoam!, that is my favorite song ever!!!!!!\nbut you are just a guest...\n"))
 				} else {
-					sess.conn.Write([]byte("I am saying 'hi' to @" + sess.curr_id + ", yeah I mean you, I must confess that\nCareless Whispers is my favorite song EVER!!!!!!"))
+					sess.conn.Write([]byte("I am saying 'hi' to @" + sess.curr_id + ", yeah I mean you, I must confess that\nCareless Whispers is my favorite song EVER!!!!!!\n"))
 				}
 			}
+			sendNormalPrompt(sess)
 		case "whoami":
 			if len(cmd.cmd_slice) != 1 {
 				sess.conn.Write([]byte(getUsage("whoami")))
 			} else {
 				if sess.curr_id == NOT_LOG_IN {
-					sess.conn.Write([]byte("you are just a guest..."))
+					sess.conn.Write([]byte("you are just a guest...\n"))
 				} else {
-					sess.conn.Write([]byte("you login as @" + sess.curr_id))
+					sess.conn.Write([]byte("you login as @" + sess.curr_id + "\n"))
 				}
 			}
+			sendNormalPrompt(sess)
 		case "register":
 			if len(cmd.cmd_slice) != 2 {
 				sess.conn.Write([]byte("register"))
@@ -242,6 +269,7 @@ func rewriteProcessCmd(sess *SESSION, cmd CMD) { // 应该传指针，这样的�
 				result, _ := register(cmd.cmd_slice[1])
 				sess.conn.Write([]byte(result))
 			} // 返回token或者id exists
+			sendNormalPrompt(sess)
 		case "login":
 			if len(cmd.cmd_slice) != 2 {
 				sess.conn.Write([]byte(getUsage("login")))
@@ -272,6 +300,7 @@ func rewriteProcessCmd(sess *SESSION, cmd CMD) { // 应该传指针，这样的�
 					online_id = append(online_id, sess.curr_id)
 				}
 			}
+			sendNormalPrompt(sess)
 		case "sendmsg":
 			to_index := ARGUMENT_INDEX_NOT_FOUND
 			msg_index := ARGUMENT_INDEX_NOT_FOUND
@@ -290,7 +319,7 @@ func rewriteProcessCmd(sess *SESSION, cmd CMD) { // 应该传指针，这样的�
 				recv_id := cmd.cmd_slice[to_index+1]
 				_, err := os.Stat(data_dir + recv_id + ".chat")
 				if err != nil {
-					sess.conn.Write([]byte("sorry, currently we don't have a user named " + recv_id + " :("))
+					sess.conn.Write([]byte("sorry, currently we don't have a user named " + recv_id + " :(\n"))
 				} else {
 					msg_str := regexp.MustCompile("-msg .*").FindString(cmd.cmd_str)[5:]
 					send_id := sess.curr_id
@@ -307,9 +336,10 @@ func rewriteProcessCmd(sess *SESSION, cmd CMD) { // 应该传指针，这样的�
 					file.WriteString(str_in_recv)
 					file.Close()
 					<-lock_channel // unlock
-					sess.conn.Write([]byte("done"))
+					sess.conn.Write([]byte("done\n"))
 				}
 			}
+			sendNormalPrompt(sess)
 		case "checkmsg":
 			if len(cmd.cmd_slice) != 1 && len(cmd.cmd_slice) != 2 {
 				sess.conn.Write([]byte(getUsage("checkmsg")))
@@ -380,48 +410,101 @@ func rewriteProcessCmd(sess *SESSION, cmd CMD) { // 应该传指针，这样的�
 					sess.conn.Write([]byte("no new message received"))
 				} else {
 					send_client_str := ""
-					for k, v := range send_client_slice {
-						if k == 0 {
-							send_client_str += v
-						} else {
-							send_client_str += "\n" + v
-						}
+					for _, v := range send_client_slice {
+						// TODO send方式
+						//if k == 0 {
+						//	send_client_str += v
+						//} else {
+						//	send_client_str += "\n" + v
+						//}
+						send_client_str += v + "\n"
 					}
 					sess.conn.Write([]byte(send_client_str))
 				} // 输出到client环节
 			}
+			sendNormalPrompt(sess)
 		case "help":
 			if len(cmd.cmd_slice) != 2 {
 				sess.conn.Write([]byte(getUsage("help")))
 			} else {
 				sess.conn.Write([]byte(getUsage(cmd.cmd_slice[1])))
 			}
+			sendNormalPrompt(sess)
+		case "startchat":
+			sess.intime_chat_the_other_id = cmd.cmd_slice[1]
+			handleIntimeChat(sess)
+		// 下面是辅助指令
+		case "noresponse": // 什么也不做
 		case "printonline": // TODO debug cmd
 			printOnline(online_id)
-		case "startchat":
-			handleIntimeChat(sess)
+		case "sendprompt":
+			sendNormalPrompt(sess)
 		default:
 			sess.conn.Write([]byte("unknown command, type 'help' to see more\n"))
 		}
 	}
 }
 
-func handleIntimeChat(sess *SESSION) { // TODO 下面是测试代码，成功！！！
+func handleIntimeChat(sess *SESSION) {
 	fmt.Println("in handleIntimeChat func")
-	for true {
-		sess.conn.Write([]byte("[in-time chat] @[" + sess.curr_id + "]#> "))
-		intime_chat_recv_str := getCmdString(sess.conn) // 虽然名字会感觉有歧义，但是复用就完了！
-		sess.conn.Write([]byte("your type: " + intime_chat_recv_str))
-		if intime_chat_recv_str == "exit" {
+	sess.conn.Write([]byte("Asking the other one... "))
+	var the_other_sess *SESSION
+	for _, v := range sessions {
+		if v.curr_id == sess.intime_chat_the_other_id {
+			the_other_sess = v
 			break
 		}
+	} // 寻找对方的session
+	the_other_sess.intime_chat_lock <- true
+	the_other_sess.conn.Write([]byte("\n" + sess.curr_id + " want to have a chat with you, would like to accept?[y/n]\n"))
+	the_other_sess.conn.Write([]byte("[#clientmov#] send_noresponse"))
+	rst := getCmdString(the_other_sess.conn)
+	sendNormalPrompt(the_other_sess)
+	if rst == "y" {
+		sess.conn.Write([]byte("yes!!!" + the_other_sess.curr_id + " accepted\n"))
+		sess.conn.Write([]byte("[#clientmov#] switch_to_chat_mode"))
+		the_other_sess.conn.Write([]byte("[#clientmov#] switch_to_chat_mode"))
+		inChatting(sess, the_other_sess)
+	} else {
+		sess.conn.Write([]byte("nop :( " + the_other_sess.curr_id + " just rejected your invitation"))
+		sendNormalPrompt(sess)
+	}
+	<-the_other_sess.intime_chat_lock
+}
+
+func inChatting(mine *SESSION, other *SESSION) {
+	double_chat_file_path := data_dir + mine.curr_id + "AND" + other.curr_id + ".doublechat"
+	file, _ := os.OpenFile(double_chat_file_path, os.O_WRONLY|os.O_CREATE, 0666) // 不存在就创建
+	file.Close()
+	go recvAndProcessChatting(other, &mine.intime_chat_file_lock, double_chat_file_path)
+	recvAndProcessChatting(mine, &mine.intime_chat_file_lock, double_chat_file_path)
+}
+
+func recvAndProcessChatting(sess *SESSION, file_lock *chan bool, chat_file_path string) {
+	for true {
+		data_str := getCmdString(sess.conn)
+		*file_lock <- true
+		file, _ := os.OpenFile(chat_file_path, os.O_WRONLY|os.O_APPEND, 0666)
+		write := bufio.NewWriter(file)
+		write.WriteString("@" + sess.curr_id + "::" + data_str + "\n")
+		write.Flush()
+		file.Close()
+		<-*file_lock
 	}
 }
 
-func sendNormalPrompt(sess *SESSION) {
-	if sess.curr_id == NOT_LOG_IN {
-		sess.conn.Write([]byte("@[?]>>> "))
-	} else {
-		sess.conn.Write([]byte("@[" + sess.curr_id + "]>>> "))
+/*
+func inChatting(mine *SESSION, other *SESSION) {
+	go recvAndPrintChatting(mine, other)
+	recvAndPrintChatting(other, mine)
+}
+
+func recvAndPrintChatting(mine *SESSION, other *SESSION) {
+	defer func() {
+		runtime.Goexit()
+	}()
+	for true {
+		mine.conn.Write([]byte(getCmdString(other.conn)))
 	}
 }
+*/
